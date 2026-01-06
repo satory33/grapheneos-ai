@@ -1,0 +1,70 @@
+*.iml
+.gradle
+/local.properties
+.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Additional patterns
+gradle.properties
+*.apk
+*.ap_
+*.dex
+*.so
+*.jar
+*.rar
+*.zip
+*.tar.gz
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# Runtime
+*.log
+.classpath
+.settings/
+bin/
+
+# Generated files
+gen/
+out/
+
+# C++ artifacts (if rebuilding)
+app/src/main/cpp/whisper.cpp/
+
+# Flutter (if using)
+flutter_module/
+.pub/
+.dart_tool/
+pubspec.lock
+
+# OS files
+Thumbs.db
+
+# Gradle
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+
+# Kotlin
+.kotlin/
+out/
+
+# Build outputs
+*.aar
+
+# Android Studio
+.navigation/
+captures/
+lint-results*.xml
+
+# Environment
+.env
+local.properties

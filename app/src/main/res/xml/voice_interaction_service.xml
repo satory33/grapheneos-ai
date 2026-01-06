@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Voice interaction service configuration for system assistant integration -->
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.satory.graphenosai.service.AssistantVoiceInteractionSessionService"
+    android:recognitionService="com.satory.graphenosai.service.AssistantRecognitionService"
+    android:settingsActivity="com.satory.graphenosai.ui.settings.AssistantSettingsActivity"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true"
+    android:supportsLocalInteraction="true" />

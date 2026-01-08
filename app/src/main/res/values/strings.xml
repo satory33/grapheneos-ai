@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AI Assistant</string>
+    <string name="assistant_tile_label">AI Assistant</string>
+    <string name="accessibility_service_description">Enable this service to activate the AI assistant using volume button combinations. The service monitors key events but does not read screen content.</string>
+</resources>

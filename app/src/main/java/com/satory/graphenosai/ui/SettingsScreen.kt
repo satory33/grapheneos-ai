@@ -751,8 +751,11 @@ fun SettingsScreen(
     // Copilot OAuth Dialog
     if (showCopilotTokenDialog) {
         GitHubOAuthDialog(
-            onTokenReceived = { token ->
-                app.secureKeyManager.setCopilotToken(token)
+            onAuthComplete = { authResult ->
+                // Store both GitHub Access Token (for refresh) and Copilot Token
+                app.secureKeyManager.setGitHubAccessToken(authResult.githubAccessToken)
+                app.secureKeyManager.setCopilotToken(authResult.copilotToken)
+                app.secureKeyManager.setCopilotTokenExpiry(authResult.copilotTokenExpiry)
                 hasCopilotToken = true
                 showCopilotTokenDialog = false
             },
@@ -1204,7 +1207,7 @@ fun BraveApiKeyDialog(
 
 @Composable
 fun GitHubOAuthDialog(
-    onTokenReceived: (String) -> Unit,
+    onAuthComplete: (GitHubCopilotAuth.FullAuthResult) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1215,6 +1218,7 @@ fun GitHubOAuthDialog(
     var userCode by remember { mutableStateOf("") }
     var verificationUri by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var fullResult by remember { mutableStateOf<GitHubCopilotAuth.FullAuthResult?>(null) }
     
     // Start OAuth flow when dialog opens
     LaunchedEffect(Unit) {
@@ -1236,8 +1240,8 @@ fun GitHubOAuthDialog(
                     authState = GitHubOAuthState.Polling
                 }
                 is GitHubCopilotAuth.AuthState.Success -> {
+                    // This is called but fullResult will be set from main result
                     authState = GitHubOAuthState.Success
-                    onTokenReceived(state.token)
                 }
                 is GitHubCopilotAuth.AuthState.Error -> {
                     errorMessage = state.message
@@ -1246,7 +1250,11 @@ fun GitHubOAuthDialog(
             }
         }
         
-        if (result.isFailure && authState != GitHubOAuthState.Success && authState != GitHubOAuthState.Error) {
+        if (result.isSuccess) {
+            fullResult = result.getOrNull()
+            authState = GitHubOAuthState.Success
+            onAuthComplete(result.getOrNull()!!)
+        } else if (result.isFailure && authState != GitHubOAuthState.Success && authState != GitHubOAuthState.Error) {
             errorMessage = result.exceptionOrNull()?.message ?: "Unknown error"
             authState = GitHubOAuthState.Error
         }

@@ -3,6 +3,9 @@ package com.satory.graphenosai.llm
 import android.util.Log
 import com.satory.graphenosai.security.SecureKeyManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -17,6 +20,8 @@ import javax.net.ssl.HttpsURLConnection
 /**
  * GitHub Copilot API client with streaming support.
  * Uses https://api.githubcopilot.com endpoint.
+ * 
+ * Features automatic token refresh when the Copilot token expires.
  */
 class CopilotClient(
     private val keyManager: SecureKeyManager,
@@ -63,6 +68,12 @@ For any questions about current events, facts, prices, news, weather - search th
     // Chat session for context
     val chatSession = ChatSession()
     
+    // Mutex to prevent concurrent token refresh
+    private val tokenRefreshMutex = Mutex()
+    
+    // Auth handler for token refresh
+    private val auth = GitHubCopilotAuth()
+    
     fun setModel(model: String) {
         currentModel = model
         Log.i(TAG, "Copilot model set to: $model")
@@ -75,6 +86,64 @@ For any questions about current events, facts, prices, news, weather - search th
     fun clearSession() {
         chatSession.clear()
     }
+    
+    /**
+     * Get a valid Copilot token, refreshing if necessary.
+     * This is the key method for automatic token refresh!
+     */
+    private suspend fun getValidToken(): String? {
+        // Check if we have a Copilot token and it's not expired
+        val currentToken = keyManager.getCopilotToken()
+        
+        if (currentToken != null && !keyManager.isCopilotTokenExpired()) {
+            return currentToken
+        }
+        
+        // Token expired or missing - try to refresh
+        Log.i(TAG, "Copilot token expired or missing, attempting refresh...")
+        
+        return tokenRefreshMutex.withLock {
+            // Double-check after acquiring lock (another thread might have refreshed)
+            val tokenAfterLock = keyManager.getCopilotToken()
+            if (tokenAfterLock != null && !keyManager.isCopilotTokenExpired()) {
+                return@withLock tokenAfterLock
+            }
+            
+            // Get GitHub access token
+            val githubToken = keyManager.getGitHubAccessToken()
+            if (githubToken == null) {
+                Log.w(TAG, "No GitHub access token stored, cannot refresh")
+                return@withLock null
+            }
+            
+            // Refresh the Copilot token
+            val result = auth.refreshCopilotToken(githubToken)
+            if (result.isSuccess) {
+                val (newCopilotToken, expiry) = result.getOrNull()!!
+                keyManager.setCopilotToken(newCopilotToken)
+                keyManager.setCopilotTokenExpiry(expiry)
+                Log.i(TAG, "Successfully refreshed Copilot token")
+                newCopilotToken
+            } else {
+                Log.e(TAG, "Failed to refresh token: ${result.exceptionOrNull()?.message}")
+                // Clear invalid tokens
+                keyManager.clearCopilotToken()
+                null
+            }
+        }
+    }
+    
+    /**
+     * Handle 401 error by refreshing token and returning new token if successful.
+     */
+    private suspend fun handleUnauthorized(): String? {
+        Log.w(TAG, "Got 401, forcing token refresh...")
+        
+        // Force refresh by clearing expiry
+        keyManager.setCopilotTokenExpiry(0)
+        
+        return getValidToken()
+    }
 
     /**
      * Perform a single non-streaming completion.
@@ -86,9 +155,9 @@ For any questions about current events, facts, prices, news, weather - search th
     ): String = withContext(Dispatchers.IO) {
         val effectiveSystemPrompt = systemPrompt ?: currentSystemPrompt
         
-        val token = keyManager.getCopilotToken()
+        var token = getValidToken()
         if (token.isNullOrBlank()) {
-             Log.e(TAG, "Copilot token not configured")
+             Log.e(TAG, "Copilot token not configured or refresh failed")
              return@withContext ""
         }
 
@@ -103,14 +172,30 @@ For any questions about current events, facts, prices, news, weather - search th
         })
         
         val requestBody = buildRequestBody(messages, stream = false)
-        val connection = createConnection(token, isVisionRequest = false)
+        var connection = createConnection(token, isVisionRequest = false)
         
         try {
             connection.outputStream.use { os ->
                 os.write(requestBody.toByteArray(Charsets.UTF_8))
             }
 
-            val responseCode = connection.responseCode
+            var responseCode = connection.responseCode
+            
+            // Handle 401 by refreshing token and retrying once
+            if (responseCode == 401) {
+                connection.disconnect()
+                token = handleUnauthorized()
+                if (token == null) {
+                    Log.e(TAG, "Token refresh failed after 401")
+                    return@withContext ""
+                }
+                connection = createConnection(token, isVisionRequest = false)
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+                responseCode = connection.responseCode
+            }
+            
             if (responseCode != HttpsURLConnection.HTTP_OK) {
                 val errorBody = connection.errorStream?.bufferedReader()?.readText()
                 Log.e(TAG, "Completion error $responseCode: $errorBody")
@@ -135,14 +220,15 @@ For any questions about current events, facts, prices, news, weather - search th
     /**
      * Stream completion WITHOUT adding user message (already added externally).
      * Used when user message was already added to chatSession.
+     * Includes automatic token refresh on 401 errors.
      */
     fun streamCompletion(
         userQuery: String,
         imageBase64: String? = null
     ): Flow<String> = flow {
-        val token = keyManager.getCopilotToken()
+        var token = getValidToken()
         if (token.isNullOrBlank()) {
-            emit("[GitHub Copilot token not configured. Add your token in Settings.]")
+            emit("[GitHub Copilot not configured. Please login via Settings.]")
             return@flow
         }
         
@@ -153,7 +239,7 @@ For any questions about current events, facts, prices, news, weather - search th
         Log.i(TAG, "Streaming with Copilot (${chatSession.messageCount()} messages, hasImage=$hasImage)")
         Log.d(TAG, "Request body: $requestBody")
 
-        val connection = createConnection(token, hasImage)
+        var connection = createConnection(token, hasImage)
         val responseBuilder = StringBuilder()
         
         try {
@@ -161,7 +247,24 @@ For any questions about current events, facts, prices, news, weather - search th
                 os.write(requestBody.toByteArray(Charsets.UTF_8))
             }
 
-            val responseCode = connection.responseCode
+            var responseCode = connection.responseCode
+            
+            // Handle 401 by refreshing token and retrying once
+            if (responseCode == 401) {
+                Log.w(TAG, "Got 401 in stream, attempting token refresh...")
+                connection.disconnect()
+                token = handleUnauthorized()
+                if (token == null) {
+                    emit("[Session expired. Please re-login via Settings.]")
+                    return@flow
+                }
+                // Retry with new token
+                connection = createConnection(token, hasImage)
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+                responseCode = connection.responseCode
+            }
             
             if (responseCode != HttpsURLConnection.HTTP_OK) {
                 val errorBody = try {
@@ -170,7 +273,7 @@ For any questions about current events, facts, prices, news, weather - search th
                 Log.e(TAG, "Copilot API error $responseCode: $errorBody")
                 
                 val errorMessage = when (responseCode) {
-                    401 -> "Invalid or expired Copilot token. Please update in Settings."
+                    401 -> "Session expired. Please re-login via Settings."
                     403 -> "Access denied. Make sure you have an active GitHub Copilot subscription."
                     429 -> "Rate limit exceeded. Please wait and try again."
                     else -> "Copilot error $responseCode: $errorBody"
@@ -229,14 +332,15 @@ For any questions about current events, facts, prices, news, weather - search th
      * Stream completion with a direct query (e.g., with search context).
      * Uses chat history but replaces the last user message with the enhanced query.
      * This way the chat history shows original question, but AI sees search results.
+     * Includes automatic token refresh on 401 errors.
      */
     fun streamCompletionDirect(
         enhancedQuery: String,
         imageBase64: String? = null
     ): Flow<String> = flow {
-        val token = keyManager.getCopilotToken()
+        var token = getValidToken()
         if (token.isNullOrBlank()) {
-            emit("[GitHub Copilot token not configured. Add your token in Settings.]")
+            emit("[GitHub Copilot not configured. Please login via Settings.]")
             return@flow
         }
         
@@ -266,7 +370,7 @@ For any questions about current events, facts, prices, news, weather - search th
         val requestBody = buildRequestBody(messages, stream = true)
         Log.i(TAG, "Streaming direct query with Copilot (${allMessages.size} history messages)")
 
-        val connection = createConnection(token, imageBase64 != null)
+        var connection = createConnection(token, imageBase64 != null)
         val responseBuilder = StringBuilder()
         
         try {
@@ -274,7 +378,23 @@ For any questions about current events, facts, prices, news, weather - search th
                 os.write(requestBody.toByteArray(Charsets.UTF_8))
             }
 
-            val responseCode = connection.responseCode
+            var responseCode = connection.responseCode
+            
+            // Handle 401 by refreshing token and retrying once
+            if (responseCode == 401) {
+                Log.w(TAG, "Got 401 in streamDirect, attempting token refresh...")
+                connection.disconnect()
+                token = handleUnauthorized()
+                if (token == null) {
+                    emit("[Session expired. Please re-login via Settings.]")
+                    return@flow
+                }
+                connection = createConnection(token, imageBase64 != null)
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+                responseCode = connection.responseCode
+            }
             
             if (responseCode != HttpsURLConnection.HTTP_OK) {
                 val errorBody = try {
@@ -328,14 +448,15 @@ For any questions about current events, facts, prices, news, weather - search th
     /**
      * Stream completion for search queries - uses enhanced query directly without adding to history.
      * This is used when we have web search context embedded in the query.
+     * Includes automatic token refresh on 401 errors.
      */
     fun streamCompletionWithSearch(
         enhancedQuery: String,
         imageBase64: String? = null
     ): Flow<String> = flow {
-        val token = keyManager.getCopilotToken()
+        var token = getValidToken()
         if (token.isNullOrBlank()) {
-            emit("[GitHub Copilot token not configured. Add your token in Settings.]")
+            emit("[GitHub Copilot not configured. Please login via Settings.]")
             return@flow
         }
         
@@ -365,7 +486,7 @@ For any questions about current events, facts, prices, news, weather - search th
         val requestBody = buildRequestBody(messages, stream = true)
         Log.i(TAG, "Streaming with search context (Copilot)")
 
-        val connection = createConnection(token, imageBase64 != null)
+        var connection = createConnection(token, imageBase64 != null)
         val responseBuilder = StringBuilder()
         
         try {
@@ -373,7 +494,23 @@ For any questions about current events, facts, prices, news, weather - search th
                 os.write(requestBody.toByteArray(Charsets.UTF_8))
             }
 
-            val responseCode = connection.responseCode
+            var responseCode = connection.responseCode
+            
+            // Handle 401 by refreshing token and retrying once
+            if (responseCode == 401) {
+                Log.w(TAG, "Got 401 in streamWithSearch, attempting token refresh...")
+                connection.disconnect()
+                token = handleUnauthorized()
+                if (token == null) {
+                    emit("[Session expired. Please re-login via Settings.]")
+                    return@flow
+                }
+                connection = createConnection(token, imageBase64 != null)
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+                responseCode = connection.responseCode
+            }
             
             if (responseCode != HttpsURLConnection.HTTP_OK) {
                 val errorBody = try {
@@ -426,14 +563,15 @@ For any questions about current events, facts, prices, news, weather - search th
 
     /**
      * Stream completion with chat session context.
+     * Includes automatic token refresh on 401 errors.
      */
     fun streamCompletionWithSession(
         userQuery: String,
         imageBase64: String? = null
     ): Flow<String> = flow {
-        val token = keyManager.getCopilotToken()
+        var token = getValidToken()
         if (token.isNullOrBlank()) {
-            emit("[GitHub Copilot token not configured. Add your token in Settings.]")
+            emit("[GitHub Copilot not configured. Please login via Settings.]")
             return@flow
         }
 
@@ -446,7 +584,7 @@ For any questions about current events, facts, prices, news, weather - search th
         
         Log.i(TAG, "Streaming with Copilot (${chatSession.messageCount()} messages)")
 
-        val connection = createConnection(token, hasImage)
+        var connection = createConnection(token, hasImage)
         val responseBuilder = StringBuilder()
         
         try {
@@ -454,7 +592,23 @@ For any questions about current events, facts, prices, news, weather - search th
                 os.write(requestBody.toByteArray(Charsets.UTF_8))
             }
 
-            val responseCode = connection.responseCode
+            var responseCode = connection.responseCode
+            
+            // Handle 401 by refreshing token and retrying once
+            if (responseCode == 401) {
+                Log.w(TAG, "Got 401 in streamWithSession, attempting token refresh...")
+                connection.disconnect()
+                token = handleUnauthorized()
+                if (token == null) {
+                    emit("[Session expired. Please re-login via Settings.]")
+                    return@flow
+                }
+                connection = createConnection(token, hasImage)
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+                responseCode = connection.responseCode
+            }
             
             if (responseCode != HttpsURLConnection.HTTP_OK) {
                 val errorBody = try {
@@ -464,7 +618,7 @@ For any questions about current events, facts, prices, news, weather - search th
                 
                 // Parse error for better message
                 val errorMessage = when (responseCode) {
-                    401 -> "Invalid or expired Copilot token. Please update in Settings."
+                    401 -> "Session expired. Please re-login via Settings."
                     403 -> "Access denied. Make sure you have an active GitHub Copilot subscription."
                     429 -> "Rate limit exceeded. Please wait and try again."
                     else -> "Copilot error $responseCode: $errorBody"

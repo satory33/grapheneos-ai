@@ -1,5 +1,6 @@
 package com.satory.graphenosai.llm
 
+import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -11,6 +12,10 @@ import javax.net.ssl.HttpsURLConnection
 /**
  * GitHub OAuth Device Flow for Copilot authentication.
  * Uses GitHub's device flow to get an access token that can be used with Copilot API.
+ * 
+ * Token Lifecycle:
+ * - GitHub Access Token: Long-lived, used to refresh Copilot tokens
+ * - Copilot Token (JWT): Short-lived (~30 min), must be refreshed regularly
  */
 class GitHubCopilotAuth {
     
@@ -27,6 +32,34 @@ class GitHubCopilotAuth {
         
         // Scopes needed for Copilot
         private const val SCOPE = "read:user"
+        
+        /**
+         * Parse expiry time from Copilot JWT token.
+         * JWT format: header.payload.signature (Base64 encoded)
+         */
+        fun parseTokenExpiry(copilotToken: String): Long {
+            return try {
+                val parts = copilotToken.split(".")
+                if (parts.size >= 2) {
+                    // Decode the payload (second part)
+                    val payload = String(Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_WRAP))
+                    val json = JSONObject(payload)
+                    // exp is in seconds, convert to milliseconds
+                    val exp = json.optLong("exp", 0)
+                    if (exp > 0) {
+                        exp * 1000L
+                    } else {
+                        0L
+                    }
+                } else {
+                    Log.w(TAG, "Invalid JWT format")
+                    0L
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse token expiry", e)
+                0L
+            }
+        }
     }
     
     data class DeviceCodeResponse(
@@ -40,6 +73,15 @@ class GitHubCopilotAuth {
     data class AuthResult(
         val accessToken: String,
         val tokenType: String
+    )
+    
+    /**
+     * Full authentication result including both tokens.
+     */
+    data class FullAuthResult(
+        val githubAccessToken: String,
+        val copilotToken: String,
+        val copilotTokenExpiry: Long
     )
     
     sealed class AuthState {
@@ -171,9 +213,10 @@ class GitHubCopilotAuth {
     }
     
     /**
-     * Step 3: Exchange GitHub access token for Copilot token
+     * Step 3: Exchange GitHub access token for Copilot token.
+     * Returns pair of (copilotToken, expiryTimestamp)
      */
-    suspend fun getCopilotToken(githubAccessToken: String): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun getCopilotToken(githubAccessToken: String): Result<Pair<String, Long>> = withContext(Dispatchers.IO) {
         try {
             val url = URL(COPILOT_TOKEN_URL)
             val connection = url.openConnection() as HttpsURLConnection
@@ -194,10 +237,10 @@ class GitHubCopilotAuth {
                 
                 Log.e(TAG, "Copilot token request failed: $responseCode - $error")
                 
-                // If 401/403, the user might not have Copilot subscription
+                // If 401/403, the user might not have Copilot subscription or GitHub token expired
                 if (responseCode == 401 || responseCode == 403) {
                     return@withContext Result.failure(Exception(
-                        "Access denied. Make sure you have an active GitHub Copilot subscription."
+                        "Access denied. Make sure you have an active GitHub Copilot subscription. You may need to re-authenticate."
                     ))
                 }
                 
@@ -208,9 +251,11 @@ class GitHubCopilotAuth {
             val json = JSONObject(response)
             
             val copilotToken = json.getString("token")
-            Log.i(TAG, "Successfully obtained Copilot token!")
+            val expiry = parseTokenExpiry(copilotToken)
             
-            Result.success(copilotToken)
+            Log.i(TAG, "Successfully obtained Copilot token! Expires at: $expiry")
+            
+            Result.success(Pair(copilotToken, expiry))
             
         } catch (e: Exception) {
             Log.e(TAG, "Copilot token error", e)
@@ -219,11 +264,21 @@ class GitHubCopilotAuth {
     }
     
     /**
+     * Refresh Copilot token using stored GitHub access token.
+     * This is the key method for token refresh!
+     */
+    suspend fun refreshCopilotToken(githubAccessToken: String): Result<Pair<String, Long>> {
+        Log.i(TAG, "Refreshing Copilot token...")
+        return getCopilotToken(githubAccessToken)
+    }
+    
+    /**
      * Full authentication flow: device code -> user auth -> copilot token
+     * Returns FullAuthResult with both GitHub access token and Copilot token
      */
     suspend fun authenticate(
         onStateChange: suspend (AuthState) -> Unit
-    ): Result<String> {
+    ): Result<FullAuthResult> {
         onStateChange(AuthState.Idle)
         
         // Step 1: Get device code
@@ -258,9 +313,13 @@ class GitHubCopilotAuth {
             return Result.failure(copilotTokenResult.exceptionOrNull()!!)
         }
         
-        val copilotToken = copilotTokenResult.getOrNull()!!
+        val (copilotToken, expiry) = copilotTokenResult.getOrNull()!!
         onStateChange(AuthState.Success(copilotToken))
         
-        return Result.success(copilotToken)
+        return Result.success(FullAuthResult(
+            githubAccessToken = authResult.accessToken,
+            copilotToken = copilotToken,
+            copilotTokenExpiry = expiry
+        ))
     }
 }

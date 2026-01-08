@@ -28,6 +28,8 @@ class SecureKeyManager(private val context: Context) {
         private const val PREFS_NAME = "assistant_secure_prefs"
         private const val PREF_OPENROUTER_KEY = "openrouter_api_key"
         private const val PREF_COPILOT_TOKEN = "copilot_token"
+        private const val PREF_GITHUB_ACCESS_TOKEN = "github_access_token"
+        private const val PREF_COPILOT_TOKEN_EXPIRY = "copilot_token_expiry"
         private const val PREF_GROQ_KEY = "groq_api_key"
         private const val PREF_SEARCH_PROXY_URL = "search_proxy_url"
         private const val PREF_TOKEN_REFRESH_TIME = "token_refresh_time"
@@ -189,6 +191,76 @@ class SecureKeyManager(private val context: Context) {
      */
     fun clearCopilotToken() {
         prefs.edit().remove(PREF_COPILOT_TOKEN).apply()
+    }
+    
+    // ========== GitHub Access Token Management (for Copilot token refresh) ==========
+    
+    /**
+     * Store GitHub Access Token securely.
+     * This is the long-lived token used to refresh Copilot tokens.
+     */
+    fun setGitHubAccessToken(token: String) {
+        val encrypted = encrypt(token)
+        prefs.edit().putString(PREF_GITHUB_ACCESS_TOKEN, encrypted).apply()
+        Log.i(TAG, "GitHub Access Token stored securely")
+    }
+    
+    /**
+     * Retrieve GitHub Access Token.
+     */
+    fun getGitHubAccessToken(): String? {
+        val encrypted = prefs.getString(PREF_GITHUB_ACCESS_TOKEN, null) ?: return null
+        return try {
+            decrypt(encrypted)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt GitHub Access Token", e)
+            null
+        }
+    }
+    
+    /**
+     * Check if GitHub Access Token is configured.
+     */
+    fun hasGitHubAccessToken(): Boolean {
+        return prefs.contains(PREF_GITHUB_ACCESS_TOKEN)
+    }
+    
+    /**
+     * Clear stored GitHub Access Token and related Copilot data.
+     */
+    fun clearGitHubAccessToken() {
+        prefs.edit()
+            .remove(PREF_GITHUB_ACCESS_TOKEN)
+            .remove(PREF_COPILOT_TOKEN)
+            .remove(PREF_COPILOT_TOKEN_EXPIRY)
+            .apply()
+        Log.i(TAG, "GitHub auth data cleared")
+    }
+    
+    /**
+     * Store Copilot token expiry timestamp.
+     */
+    fun setCopilotTokenExpiry(expiryTimestamp: Long) {
+        prefs.edit().putLong(PREF_COPILOT_TOKEN_EXPIRY, expiryTimestamp).apply()
+        Log.d(TAG, "Copilot token expiry set to: $expiryTimestamp")
+    }
+    
+    /**
+     * Get Copilot token expiry timestamp.
+     */
+    fun getCopilotTokenExpiry(): Long {
+        return prefs.getLong(PREF_COPILOT_TOKEN_EXPIRY, 0)
+    }
+    
+    /**
+     * Check if Copilot token is expired or about to expire.
+     * Returns true if token expires in less than 5 minutes.
+     */
+    fun isCopilotTokenExpired(): Boolean {
+        val expiry = getCopilotTokenExpiry()
+        if (expiry == 0L) return true
+        // Refresh 5 minutes before actual expiry
+        return System.currentTimeMillis() >= (expiry - 5 * 60 * 1000)
     }
 
     // ========== Groq API Key Management ==========

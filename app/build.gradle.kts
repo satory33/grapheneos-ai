@@ -12,8 +12,8 @@ android {
         applicationId = "com.satory.graphenosai"
         minSdk = 26 // Required for Android Keystore AES-GCM
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         

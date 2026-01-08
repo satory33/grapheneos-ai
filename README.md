@@ -1,5 +1,7 @@
 # AI Assistant for Android
 
+**v1.1** - Automatic GitHub Copilot token refresh, now with seamless long sessions!
+
 A privacy-focused AI assistant I built as an alternative to Google Gemini while using GrapheneOS. Works on any Android device, but tested primarily on Android 16 (Pixel 9 Pro).
 
 > **Why this exists**: I wanted the convenience of an always-available AI assistant (like Gemini) without sacrificing privacy on GrapheneOS. So I built my own.
@@ -65,20 +67,12 @@ Good question! Here's my reasoning:
 - **Open source**: You can see exactly what it does
 - **GrapheneOS compatible**: Works perfectly without Google Play Services
 
-## ⚠️ Known Issues
-
-### GitHub Copilot - Session Expires Quickly
-If you're using GitHub Copilot as your AI backend, be aware that **sessions expire quickly** (typically within hours). This means you'll need to **re-authenticate frequently**, which can be inconvenient.
-
-**Workaround**: 
-- Use **OpenRouter** instead (recommended) - more stable sessions
-- Re-authenticate in Settings when prompted
-- Consider switching to OpenRouter for a better experience
-
 ## 📚 Documentation
 
 - **[Architecture Overview](docs/ARCHITECTURE.md)** - Technical design and components
 - **[Documentation](docs/DOCUMENTATION.md)** - How to build and use
+- **[Token Refresh](docs/TOKEN_REFRESH.md)** - How automatic token refresh works
+- **[Changelog](CHANGELOG.md)** - Version history and release notes
 
 ## 🤝 Contributing
 

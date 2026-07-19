@@ -39,7 +39,6 @@ class AudioCaptureManager(private val context: Context) {
     private var isRecording = false
     private var outputFile: File? = null
     private var pcmOutputStream: FileOutputStream? = null
-    private val pcmBuffer = mutableListOf<ByteArray>()
 
     private val bufferSize: Int by lazy {
         val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -66,7 +65,6 @@ class AudioCaptureManager(private val context: Context) {
             // Create output file in app's private cache directory (scoped storage)
             outputFile = File(context.cacheDir, "audio_${System.currentTimeMillis()}.pcm")
             pcmOutputStream = FileOutputStream(outputFile)
-            pcmBuffer.clear()
 
             audioRecord = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -92,7 +90,6 @@ class AudioCaptureManager(private val context: Context) {
                 
                 if (bytesRead > 0) {
                     val chunk = buffer.copyOf(bytesRead)
-                    pcmBuffer.add(chunk)
                     pcmOutputStream?.write(chunk)
                     trySend(chunk)
                 } else if (bytesRead == AudioRecord.ERROR_INVALID_OPERATION) {
@@ -118,16 +115,21 @@ class AudioCaptureManager(private val context: Context) {
      */
     fun stopCapture(): File {
         stopRecordingInternal()
-        
+
         val pcmFile = outputFile ?: throw IllegalStateException("No recording in progress")
         val wavFile = File(context.cacheDir, "audio_${System.currentTimeMillis()}.wav")
-        
-        // Convert PCM to WAV
-        convertPcmToWav(pcmFile, wavFile)
-        
-        // Clean up PCM file
+
+        try {
+            convertPcmToWav(pcmFile, wavFile)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to convert PCM to WAV", e)
+            // Don't delete the PCM file if conversion failed — data can still be recovered
+            return wavFile
+        }
+
+        // Clean up PCM file only after successful WAV conversion
         pcmFile.delete()
-        
+
         return wavFile
     }
 

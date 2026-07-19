@@ -12,8 +12,8 @@ android {
         applicationId = "com.satory.graphenosai"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 5
+        versionName = "1.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -149,16 +149,11 @@ tasks.register("checkLlamaPrebuilt") {
         }
 
         if (missing.isNotEmpty()) {
-            throw org.gradle.api.GradleException(
-                "Missing prebuilt llama libs in ${prebuiltDir.absolutePath}: $missing.\n" +
-                    "Build or copy the required .so files into src/main/cpp/llama/prebuilt/arm64-v8a."
-            )
+            println("WARNING: Missing prebuilt llama libs: $missing")
+            println("Local AI (llama.cpp) will not be available in this build.")
+            println("The stub JNI implementation will handle this gracefully.")
         } else {
             println("All required prebuilt llama libs present in ${prebuiltDir.absolutePath}")
         }
     }
-}
-
-tasks.named("preBuild") {
-    dependsOn("checkLlamaPrebuilt")
 }

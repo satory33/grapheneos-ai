@@ -154,14 +154,16 @@ class SpeechRecognizerManager(private val context: Context) {
     }
 
     fun stopListening() {
+        val recognizer = speechRecognizer ?: return
         try {
-            speechRecognizer?.stopListening()
-            speechRecognizer?.cancel()
-            speechRecognizer?.destroy()
-            speechRecognizer = null
-            isListening = false
+            recognizer.stopListening()
+            recognizer.cancel()
+            recognizer.destroy()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping speech recognizer", e)
+        } finally {
+            speechRecognizer = null
+            isListening = false
         }
     }
     

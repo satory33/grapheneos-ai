@@ -6,19 +6,111 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import java.util.Locale
 import kotlin.coroutines.resume
 
 /**
  * TTS Manager using Android's built-in TextToSpeech engine.
  * Falls back to on-device synthesis when available.
+ * Supports user-selectable language locales.
  */
 class TTSManager(context: Context) {
 
     companion object {
         private const val TAG = "TTSManager"
         private const val UTTERANCE_ID_PREFIX = "assistant_tts_"
-        
+        private const val TTS_TIMEOUT_MS = 30_000L
+
+        /**
+         * Commonly supported Android TTS locales with display names.
+         * Available on most devices with Google TTS or device TTS engine.
+         */
+        val AVAILABLE_TTS_LOCALES = listOf(
+            LocaleInfo(Locale.US, "English (US)"),
+            LocaleInfo(Locale.UK, "English (UK)"),
+            LocaleInfo(Locale.CANADA, "English (Canada)"),
+            LocaleInfo(Locale("en", "AU"), "English (Australia)"),
+            LocaleInfo(Locale("en", "IN"), "English (India)"),
+            LocaleInfo(Locale.FRANCE, "Français (France)"),
+            LocaleInfo(Locale("fr", "CA"), "Français (Canada)"),
+            LocaleInfo(Locale.GERMANY, "Deutsch (Deutschland)"),
+            LocaleInfo(Locale.ITALY, "Italiano (Italia)"),
+            LocaleInfo(Locale.JAPAN, "日本語"),
+            LocaleInfo(Locale.KOREA, "한국어"),
+            LocaleInfo(Locale.CHINA, "中文 (中国)"),
+            LocaleInfo(Locale.TAIWAN, "中文 (台湾)"),
+            LocaleInfo(Locale("es", "ES"), "Español (España)"),
+            LocaleInfo(Locale("es", "MX"), "Español (México)"),
+            LocaleInfo(Locale("pt", "BR"), "Português (Brasil)"),
+            LocaleInfo(Locale("pt", "PT"), "Português (Portugal)"),
+            LocaleInfo(Locale("ru", "RU"), "Русский"),
+            LocaleInfo(Locale("ar", "SA"), "العربية (السعودية)"),
+            LocaleInfo(Locale("hi", "IN"), "हिन्दी (भारत)"),
+            LocaleInfo(Locale("nl", "NL"), "Nederlands"),
+            LocaleInfo(Locale("pl", "PL"), "Polski"),
+            LocaleInfo(Locale("tr", "TR"), "Türkçe"),
+            LocaleInfo(Locale("sv", "SE"), "Svenska"),
+            LocaleInfo(Locale("da", "DK"), "Dansk"),
+            LocaleInfo(Locale("fi", "FI"), "Suomi"),
+            LocaleInfo(Locale("nb", "NO"), "Norsk Bokmål"),
+            LocaleInfo(Locale("th", "TH"), "ไทย"),
+            LocaleInfo(Locale("cs", "CZ"), "Čeština"),
+            LocaleInfo(Locale("el", "GR"), "Ελληνικά"),
+            LocaleInfo(Locale("ro", "RO"), "Română"),
+            LocaleInfo(Locale("hu", "HU"), "Magyar"),
+            LocaleInfo(Locale("vi", "VN"), "Tiếng Việt"),
+            LocaleInfo(Locale("uk", "UA"), "Українська"),
+            LocaleInfo(Locale("ms", "MY"), "Bahasa Melayu"),
+            LocaleInfo(Locale("id", "ID"), "Bahasa Indonesia"),
+            LocaleInfo(Locale("fil", "PH"), "Filipino"),
+        )
+
+        /** Default locale tag used when the device locale is not in our list */
+        private const val DEFAULT_LOCALE_TAG = "en-US"
+
+        /**
+         * Resolve a locale from a BCP-47 language tag, falling back to US English.
+         */
+        private fun localeFromTag(tag: String): Locale {
+            return try {
+                val parts = tag.split("-", limit = 2)
+                if (parts.size == 2) {
+                    Locale(parts[0], parts[1].uppercase(Locale.ROOT))
+                } else {
+                    Locale(tag)
+                }
+            } catch (_: Exception) {
+                Locale.US
+            }
+        }
+
+        /**
+         * Get a LocaleInfo from an AVAILABLE_TTS_LOCALES entry by its BCP-47 tag.
+         * Falls back to US English.
+         */
+        fun getLocaleByTag(tag: String): LocaleInfo {
+            return AVAILABLE_TTS_LOCALES.find { it.localeTag() == tag }
+                ?: LocaleInfo(Locale.US, "English (US)")
+        }
+
+        /**
+         * Resolve best matching entry for the device default locale.
+         */
+        fun resolveDeviceLocale(): String {
+            val deviceLocale = Locale.getDefault()
+            val tag = "${deviceLocale.language}-${deviceLocale.country}"
+            return if (AVAILABLE_TTS_LOCALES.any { it.localeTag() == tag }) {
+                tag
+            } else {
+                // Try matching only language
+                val match = AVAILABLE_TTS_LOCALES.find {
+                    it.locale.language == deviceLocale.language
+                }
+                match?.localeTag() ?: DEFAULT_LOCALE_TAG
+            }
+        }
+
         /**
          * Check if TTS is available on this device without initializing it.
          * Uses PackageManager to query for TTS service providers rather than
@@ -37,31 +129,98 @@ class TTSManager(context: Context) {
         }
     }
 
+    /** Represents a selectable TTS locale with display metadata. */
+    data class LocaleInfo(
+        val locale: Locale,
+        val displayName: String
+    ) {
+        /** BCP-47 language tag, e.g. "en-US", "fr-FR" */
+        fun localeTag(): String = "${locale.language}-${locale.country}"
+    }
+
     private var tts: TextToSpeech? = null
     private var isInitialized = false
     private var utteranceCounter = 0
+    private var currentLocale: Locale = Locale.US
+    private var currentLocaleTag: String = DEFAULT_LOCALE_TAG
 
     init {
+        // Default to device locale; user can override via setLanguage()
+        val deviceTag = resolveDeviceLocale()
+        currentLocale = getLocaleByTag(deviceTag).locale
+        currentLocaleTag = deviceTag
+
         tts = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                val result = tts?.setLanguage(Locale.US)
-                isInitialized = result != TextToSpeech.LANG_MISSING_DATA &&
-                        result != TextToSpeech.LANG_NOT_SUPPORTED
-                
+                applyLanguage(currentLocale)
+
                 if (isInitialized) {
                     // Configure for optimal speech
                     tts?.setSpeechRate(1.0f)
                     tts?.setPitch(1.0f)
-                    Log.i(TAG, "TTS initialized successfully")
+                    Log.i(TAG, "TTS initialized successfully with locale: $currentLocaleTag")
                 } else {
-                    Log.w(TAG, "TTS language not supported")
+                    // Fallback to US English
+                    Log.w(TAG, "Locale $currentLocaleTag not supported, falling back to US English")
+                    applyLanguage(Locale.US)
+                    currentLocaleTag = DEFAULT_LOCALE_TAG
+
+                    if (isInitialized) {
+                        Log.i(TAG, "TTS initialized with US English fallback")
+                    } else {
+                        Log.w(TAG, "TTS language not supported even with US English fallback")
+                    }
                 }
             } else {
                 Log.e(TAG, "TTS initialization failed: $status")
             }
         }
     }
-    
+
+    /**
+     * Apply a locale to the TTS engine and update initialization state.
+     */
+    private fun applyLanguage(locale: Locale) {
+        val result = tts?.setLanguage(locale)
+        isInitialized = result != TextToSpeech.LANG_MISSING_DATA &&
+                result != TextToSpeech.LANG_NOT_SUPPORTED
+    }
+
+    /**
+     * Change TTS language at runtime.
+     * Returns true if the locale is supported by the current TTS engine.
+     */
+    fun setLanguage(tag: String): Boolean {
+        val localeInfo = getLocaleByTag(tag)
+        val locale = localeInfo.locale
+
+        if (!isInitialized && tts == null) {
+            // TTS not yet initialized; save for later
+            currentLocale = locale
+            currentLocaleTag = tag
+            return false
+        }
+
+        val result = tts?.setLanguage(locale)
+        val supported = result != TextToSpeech.LANG_MISSING_DATA &&
+                result != TextToSpeech.LANG_NOT_SUPPORTED
+
+        if (supported) {
+            currentLocale = locale
+            currentLocaleTag = tag
+            Log.i(TAG, "TTS language changed to: $tag")
+        } else {
+            Log.w(TAG, "TTS language $tag not supported by current engine")
+        }
+
+        return supported
+    }
+
+    /**
+     * Get current TTS language tag (BCP-47).
+     */
+    fun getCurrentLanguageTag(): String = currentLocaleTag
+
     /**
      * Check if TTS is initialized and ready to use.
      */
@@ -77,10 +236,10 @@ class TTSManager(context: Context) {
         }
 
         val utteranceId = "${UTTERANCE_ID_PREFIX}${utteranceCounter++}"
-        
+
         // Split long text into chunks to avoid TTS limits
         val chunks = splitIntoChunks(text, 4000)
-        
+
         chunks.forEachIndexed { index, chunk ->
             val mode = if (index == 0) queueMode else TextToSpeech.QUEUE_ADD
             tts?.speak(chunk, mode, null, "$utteranceId-$index")
@@ -90,7 +249,9 @@ class TTSManager(context: Context) {
     /**
      * Speak text and suspend until complete.
      */
-    suspend fun speakAndWait(text: String): Boolean = suspendCancellableCoroutine { cont ->
+    suspend fun speakAndWait(text: String): Boolean =
+        withTimeout(TTS_TIMEOUT_MS) {
+        suspendCancellableCoroutine { cont ->
         if (!isInitialized) {
             cont.resume(false)
             return@suspendCancellableCoroutine
@@ -140,6 +301,7 @@ class TTSManager(context: Context) {
             stop()
         }
     }
+    }
 
     /**
      * Stop ongoing speech.
@@ -177,7 +339,7 @@ class TTSManager(context: Context) {
     }
 
     /**
-     * Check if a specific language is available.
+     * Check if a specific language is available on the current engine.
      */
     fun isLanguageAvailable(locale: Locale): Boolean {
         val result = tts?.isLanguageAvailable(locale) ?: TextToSpeech.LANG_NOT_SUPPORTED

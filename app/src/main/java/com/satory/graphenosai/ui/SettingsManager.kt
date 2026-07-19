@@ -24,6 +24,7 @@ class SettingsManager(context: Context) {
         private const val KEY_API_PROVIDER = "api_provider"
         private const val KEY_WHISPER_PROVIDER = "whisper_provider"
         private const val KEY_SEARCH_ENGINE = "search_engine"
+        private const val KEY_TTS_LANGUAGE = "tts_language"
         
         const val VOICE_INPUT_SYSTEM = "system"
         const val VOICE_INPUT_VOSK = "vosk"
@@ -76,6 +77,7 @@ class SettingsManager(context: Context) {
         
         const val DEFAULT_MODEL = "openai/gpt-5.4-mini"
         const val DEFAULT_LANGUAGE = "en"
+        const val DEFAULT_TTS_LANGUAGE = "en-US"
         
         val DEFAULT_SYSTEM_PROMPT = SystemPrompts.CLOUD_DEFAULT
     }
@@ -140,6 +142,10 @@ class SettingsManager(context: Context) {
     var searchEngine: String
         get() = prefs.getString(KEY_SEARCH_ENGINE, SEARCH_BRAVE) ?: SEARCH_BRAVE
         set(value) = prefs.edit().putString(KEY_SEARCH_ENGINE, value).apply()
+
+    var ttsLanguage: String
+        get() = prefs.getString(KEY_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE) ?: DEFAULT_TTS_LANGUAGE
+        set(value) = prefs.edit().putString(KEY_TTS_LANGUAGE, value).apply()
     
     var localModelId: String
         get() = prefs.getString(KEY_LOCAL_MODEL_ID, DEFAULT_LOCAL_MODEL) ?: DEFAULT_LOCAL_MODEL

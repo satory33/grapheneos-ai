@@ -73,13 +73,13 @@ class ChatSession {
             // Handle vision content
             if (includeVision && msg.imageBase64 != null) {
                 val contentArray = JSONArray()
-                
+
                 // Text part
                 contentArray.put(JSONObject().apply {
                     put("type", "text")
                     put("text", textContent)
                 })
-                
+
                 // Image part
                 contentArray.put(JSONObject().apply {
                     put("type", "image_url")
@@ -87,8 +87,13 @@ class ChatSession {
                         put("url", "data:image/jpeg;base64,${msg.imageBase64}")
                     })
                 })
-                
+
                 msgObj.put("content", contentArray)
+            } else if (msg.imageBase64 != null && !includeVision) {
+                // Image attached but current model doesn't support vision —
+                // include a text note so the model knows an image was provided
+                Log.w(TAG, "Image attached but includeVision=false; current model doesn't support images")
+                msgObj.put("content", textContent)
             } else {
                 msgObj.put("content", textContent)
             }

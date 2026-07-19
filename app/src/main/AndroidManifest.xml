@@ -110,14 +110,11 @@
             </intent-filter>
         </service>
 
+        <!-- Voice interaction session (bound internally by framework) -->
         <service
             android:name=".service.AssistantVoiceInteractionSessionService"
             android:exported="true"
-            android:permission="android.permission.BIND_VOICE_INTERACTION">
-            <intent-filter>
-                <action android:name="android.service.voice.VoiceInteractionService" />
-            </intent-filter>
-        </service>
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
 
         <!-- Tile for quick settings -->
         <service

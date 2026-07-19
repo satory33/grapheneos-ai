@@ -158,8 +158,10 @@ class CompactAssistantActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        Intent(this, AssistantService::class.java).also { intent ->
-            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        if (!bound) {
+            Intent(this, AssistantService::class.java).also { intent ->
+                bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+            }
         }
     }
 
@@ -211,7 +213,7 @@ fun CompactAssistantView(
     }
     val supportsVision = when {
         isLocalProvider -> false
-        else -> service.openRouterClient.isVisionCapable()
+        else -> service.isVisionCapable()
     }
     val isGenerating = state is AssistantState.Processing ||
         state is AssistantState.Searching ||
@@ -669,7 +671,7 @@ fun FullChatScreen(
     }
     val supportsVision = when {
         isLocalProvider -> false
-        else -> service.openRouterClient.isVisionCapable()
+        else -> service.isVisionCapable()
     }
     val isGenerating = state is AssistantState.Processing ||
         state is AssistantState.Searching ||

@@ -184,7 +184,8 @@ class OpenMeteoClient {
 
     private fun fallbackLocationFromTimezone(): String {
         val zone = ZoneId.systemDefault().id
-        return zone.substringAfterLast('/').replace('_', ' ').ifBlank { "Warsaw" }
+        val city = zone.substringAfterLast('/').replace('_', ' ')
+        return city.takeIf { it.isNotBlank() && it != "UTC" && it != "GMT" && it != "Etc" } ?: "Warsaw"
     }
 
     private data class GeoLocation(

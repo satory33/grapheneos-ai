@@ -123,6 +123,8 @@ class WhisperTranscriber(
         } catch (e: Exception) {
             Log.e(TAG, "Whisper transcription error", e)
             Result.failure(e)
+        } finally {
+            connection.disconnect()
         }
     }
 }

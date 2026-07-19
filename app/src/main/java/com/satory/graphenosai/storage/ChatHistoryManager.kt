@@ -151,6 +151,7 @@ class ChatHistoryManager(private val context: Context) {
      * Get list of all saved chats.
      */
     fun getSavedChats(): List<ChatSummary> {
+        synchronized(this) {
         return historyDir.listFiles { file -> file.extension == "json" }
             ?.mapNotNull { file ->
                 try {
@@ -182,6 +183,7 @@ class ChatHistoryManager(private val context: Context) {
             }
             ?.sortedByDescending { it.timestamp }
             ?: emptyList()
+        }
     }
     
     /**

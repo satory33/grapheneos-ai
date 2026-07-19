@@ -190,6 +190,30 @@ private fun parseMarkdown(
                     }
                 }
                 
+                // Markdown link: [text](url)
+                text.startsWith("[", i) && !text.startsWith("[](", i) -> {
+                    val closeBracket = text.indexOf("](", i + 1)
+                    if (closeBracket != -1) {
+                        val closeParen = text.indexOf(')', closeBracket + 2)
+                        if (closeParen != -1) {
+                            val linkText = text.substring(i + 1, closeBracket)
+                            withStyle(SpanStyle(
+                                color = colorScheme.primary,
+                                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+                            )) {
+                                append(linkText)
+                            }
+                            i = closeParen + 1
+                        } else {
+                            append(text[i])
+                            i++
+                        }
+                    } else {
+                        append(text[i])
+                        i++
+                    }
+                }
+                
                 text.startsWith("**", i) -> {
                     val endOfBold = text.indexOf("**", i + 2)
                     if (endOfBold != -1) {

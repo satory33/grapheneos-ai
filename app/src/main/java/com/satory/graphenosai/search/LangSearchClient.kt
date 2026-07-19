@@ -51,9 +51,8 @@ class LangSearchClient(private val keyManager: SecureKeyManager) {
         }
 
         val requestBody = JSONObject().apply {
-            put("query", query)
-            put("count", maxResults)
-            put("summary", true)
+            put("q", query)
+            put("max_results", maxResults)
         }
 
         try {
@@ -83,24 +82,45 @@ class LangSearchClient(private val keyManager: SecureKeyManager) {
 
         try {
             val json = JSONObject(responseBody)
-            val webPages = json.optJSONObject("webPages") ?: return emptyList()
-            val value = webPages.optJSONArray("value") ?: return emptyList()
+            Log.d(TAG, "LangSearch response keys: ${json.keys().asSequence().toList()}")
 
-            for (i in 0 until minOf(value.length(), maxResults)) {
-                val item = value.getJSONObject(i)
-
-                val snippet = item.optString("snippet", "").take(500).ifBlank {
-                    item.optString("summary", "").take(500)
-                }
-
-                results.add(
-                    SearchResult(
-                        title = item.optString("name", ""),
-                        url = item.optString("url", ""),
-                        snippet = snippet
+            // LangSearch native API format: { "results": [...] }
+            val resultsArray = json.optJSONArray("results")
+            if (resultsArray != null) {
+                for (i in 0 until minOf(resultsArray.length(), maxResults)) {
+                    val item = resultsArray.getJSONObject(i)
+                    results.add(
+                        SearchResult(
+                            title = item.optString("title", ""),
+                            url = item.optString("url", ""),
+                            snippet = item.optString("snippet", "").take(500)
+                        )
                     )
-                )
+                }
+                return results
             }
+
+            // Fallback: Bing-compatible format { "webPages": { "value": [...] } }
+            val webPages = json.optJSONObject("webPages")
+            val value = webPages?.optJSONArray("value")
+            if (value != null) {
+                for (i in 0 until minOf(value.length(), maxResults)) {
+                    val item = value.getJSONObject(i)
+                    val snippet = item.optString("snippet", "").take(500).ifBlank {
+                        item.optString("summary", "").take(500)
+                    }
+                    results.add(
+                        SearchResult(
+                            title = item.optString("name", ""),
+                            url = item.optString("url", ""),
+                            snippet = snippet
+                        )
+                    )
+                }
+                return results
+            }
+
+            Log.w(TAG, "Unknown LangSearch response format: ${responseBody.take(200)}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse LangSearch response", e)
         }

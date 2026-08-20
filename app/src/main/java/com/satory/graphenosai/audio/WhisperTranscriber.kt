@@ -41,16 +41,18 @@ class WhisperTranscriber(
             return@withContext Result.failure(Exception("API key not configured"))
         }
         
+        var connection: HttpsURLConnection? = null
         try {
             val url = when (provider) {
                 Provider.OPENAI -> URL(WHISPER_URL)
                 Provider.GROQ -> URL(GROQ_WHISPER_URL)
             }
             
-            val connection = url.openConnection() as HttpsURLConnection
+            val activeConnection = url.openConnection() as HttpsURLConnection
+            connection = activeConnection
             val boundary = "----WebKitFormBoundary${System.currentTimeMillis()}"
             
-            connection.apply {
+            activeConnection.apply {
                 requestMethod = "POST"
                 connectTimeout = TIMEOUT_MS
                 readTimeout = TIMEOUT_MS
@@ -99,17 +101,17 @@ class WhisperTranscriber(
                 writer.flush()
             }
             
-            val responseCode = connection.responseCode
+            val responseCode = activeConnection.responseCode
             
             if (responseCode != 200) {
                 val error = try {
-                    connection.errorStream?.bufferedReader()?.readText() ?: "Unknown error"
+                    activeConnection.errorStream?.bufferedReader()?.readText() ?: "Unknown error"
                 } catch (e: Exception) { "Error $responseCode" }
                 Log.e(TAG, "Whisper API error: $error")
                 return@withContext Result.failure(Exception("Transcription failed: $responseCode"))
             }
             
-            val response = connection.inputStream.bufferedReader().readText()
+            val response = activeConnection.inputStream.bufferedReader().readText()
             val json = JSONObject(response)
             val text = json.optString("text", "").trim()
             
@@ -124,7 +126,7 @@ class WhisperTranscriber(
             Log.e(TAG, "Whisper transcription error", e)
             Result.failure(e)
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 }

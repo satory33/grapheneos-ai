@@ -3,6 +3,7 @@ package com.satory.graphenosai.service
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.app.ActivityManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Binder
@@ -14,6 +15,7 @@ import com.satory.graphenosai.MainActivity
 import com.satory.graphenosai.R
 import com.satory.graphenosai.audio.AudioCaptureManager
 import com.satory.graphenosai.audio.SpeechRecognizerManager
+import com.satory.graphenosai.audio.VoiceActivityDetector
 import com.satory.graphenosai.audio.VoskTranscriber
 import com.satory.graphenosai.audio.WhisperTranscriber
 import com.satory.graphenosai.llm.*
@@ -63,7 +65,7 @@ class AssistantService : Service() {
         private set
     lateinit var settingsManager: SettingsManager
         private set
-    private lateinit var chatHistoryManager: ChatHistoryManager
+    lateinit var chatHistoryManager: ChatHistoryManager
     
     private var speechRecognitionJob: Job? = null
     private var audioCaptureJob: Job? = null
@@ -171,6 +173,7 @@ class AssistantService : Service() {
         
         const val EXTRA_TRIGGER = "trigger"
         const val EXTRA_QUERY = "query"
+        const val EXTRA_LAUNCH_OVERLAY = "launch_overlay"
     }
 
     inner class AssistantBinder : Binder() {
@@ -214,10 +217,10 @@ class AssistantService : Service() {
             setSystemPrompt(settingsManager.systemPrompt)
         }
         
-        // Initialize local model if provider is set to local
-        if (settingsManager.apiProvider == SettingsManager.PROVIDER_LOCAL) {
-            initializeLocalModel()
-        }
+        // Do not load a local model merely because the app was opened or the
+        // settings screen bound this service. Large GGUF models allocate native
+        // memory and can make Android kill the whole process before the user
+        // has even asked a question. ensureLocalModelReady() loads on demand.
         
         braveSearchClient = BraveSearchClient(app.secureKeyManager)
         exaSearchClient = ExaSearchClient(app.secureKeyManager)
@@ -262,7 +265,9 @@ class AssistantService : Service() {
                 startForeground(NOTIFICATION_ID, createNotification("Assistant ready"))
                 // Clear session on each activation for fresh start
                 clearSession()
-                launchOverlay()
+                if (intent.getBooleanExtra(EXTRA_LAUNCH_OVERLAY, true)) {
+                    launchOverlay()
+                }
             }
             ACTION_START_VOICE -> startVoiceCapture()
             ACTION_STOP_VOICE -> stopVoiceCapture()
@@ -330,7 +335,10 @@ class AssistantService : Service() {
         val voiceMethod = settingsManager.voiceInputMethod
         val preferVosk = voiceMethod == SettingsManager.VOICE_INPUT_VOSK
         val preferWhisper = voiceMethod == SettingsManager.VOICE_INPUT_WHISPER
-        val voskReady = voskTranscriber.isReady()
+        // A downloaded model may still be initialising after the service starts.
+        // Capture with Vosk in that case; transcribe() will wait for initialization
+        // after the recording ends instead of falling back to an online recognizer.
+        val voskInstalled = !voskTranscriber.needsModelDownload(settingsManager.voiceLanguage)
         val systemAvailable = speechRecognizerManager.isAvailable()
         
         // Decision tree:
@@ -347,7 +355,7 @@ class AssistantService : Service() {
                 startWhisperCapture()
             }
             // Vosk preferred and ready
-            preferVosk && voskReady -> {
+            preferVosk && voskInstalled -> {
                 Log.i(TAG, "Using Vosk transcription (preferred)")
                 startVoskCapture()
             }
@@ -357,20 +365,15 @@ class AssistantService : Service() {
                 startSystemSpeechRecognition()
             }
             // Vosk preferred but not ready, try system as fallback
-            preferVosk && !voskReady && systemAvailable -> {
+            preferVosk && !voskInstalled && systemAvailable -> {
                 Log.i(TAG, "Using system speech recognition (Vosk not ready, fallback)")
                 startSystemSpeechRecognition()
-            }
-            // System preferred but unavailable, try Vosk as fallback
-            !preferVosk && !systemAvailable && voskReady -> {
-                Log.i(TAG, "Using Vosk transcription (system unavailable, fallback)")
-                startVoskCapture()
             }
             // Nothing available
             else -> {
                 val message = when {
-                    preferVosk && !voskReady -> "Please download Vosk model in Settings for offline voice input."
-                    !preferVosk && !systemAvailable -> "No system speech recognition available. Enable Vosk in Settings."
+                    preferVosk && !voskInstalled -> "Please download Vosk model in Settings for offline voice input."
+                    !preferVosk && !preferWhisper && !systemAvailable -> systemRecognitionUnavailableMessage()
                     else -> "Voice recognition unavailable. Please check Settings."
                 }
                 _transcription.value = ""
@@ -425,13 +428,23 @@ class AssistantService : Service() {
                             is SpeechRecognizerManager.RecognitionResult.Error -> {
                                 Log.e(TAG, "Speech recognition error (${result.code}): ${result.message}")
                                 
-                                // For CLIENT_ERROR (code 5), it means no recognition service is available
+                                // ERROR_CLIENT commonly means that the selected Android
+                                // RecognitionService is missing or cannot start.
                                 if (result.code == 5) {
-                                    Log.w(TAG, "No system speech recognition service available, switching to Vosk")
-                                    
-                                    // Stop system recognition flow
+                                    val usingSystemMethod = settingsManager.voiceInputMethod == SettingsManager.VOICE_INPUT_SYSTEM
+                                    val voskInstalled = !voskTranscriber.needsModelDownload(settingsManager.voiceLanguage)
                                     speechRecognizerManager.stopListening()
-                                    shouldSwitchToVosk = true
+                                    if (usingSystemMethod || !voskInstalled) {
+                                        _response.value = if (usingSystemMethod) {
+                                            systemRecognitionUnavailableMessage()
+                                        } else {
+                                            "Android system speech recognition is unavailable, and the selected Vosk model is not downloaded. Download the Vosk language model in Settings."
+                                        }
+                                        _assistantState.value = AssistantState.Error("System speech recognition unavailable")
+                                    } else {
+                                        Log.w(TAG, "System recognition failed; falling back to installed Vosk")
+                                        shouldSwitchToVosk = true
+                                    }
                                     return@collect
                                 }
                                 
@@ -455,7 +468,7 @@ class AssistantService : Service() {
                 
                 // After collect finishes, check if we need to switch to Vosk
                 if (shouldSwitchToVosk) {
-                    if (voskTranscriber.isReady()) {
+                    if (!voskTranscriber.needsModelDownload(settingsManager.voiceLanguage)) {
                         Log.i(TAG, "Switching to Vosk for voice input")
                         _assistantState.value = AssistantState.Listening
                         startVoskCapture()
@@ -470,6 +483,12 @@ class AssistantService : Service() {
                 _assistantState.value = AssistantState.Error(e.message ?: "Speech recognition failed")
             }
         }
+    }
+
+    private fun systemRecognitionUnavailableMessage(): String {
+        return "Android system speech recognition is not available on this device. " +
+            "On GrapheneOS, install and select a compatible speech recognition service, " +
+            "or choose Vosk (Offline) and download its language model in Settings."
     }
     
     private fun startVoskCapture() {
@@ -493,9 +512,21 @@ class AssistantService : Service() {
     private fun startAudioCaptureJob(label: String) {
         audioCaptureJob?.cancel()
         audioCaptureJob = serviceScope.launch(Dispatchers.IO) {
+            val voiceActivityDetector = if (settingsManager.autoSendVoice) VoiceActivityDetector() else null
+            var autoStopRequested = false
             try {
                 audioCaptureManager.startCapture()
-                    .collect { }
+                    .collect { chunk ->
+                        if (!autoStopRequested && voiceActivityDetector?.addPcmChunk(chunk) == true) {
+                            autoStopRequested = true
+                            Log.i(TAG, "$label detected end of speech; sending automatically")
+                            // Do not cancel this coroutine from inside collect. Schedule the
+                            // normal stop path, which finalizes the WAV file and transcribes it.
+                            serviceScope.launch(Dispatchers.Main) {
+                                stopVoiceCapture()
+                            }
+                        }
+                    }
             } catch (e: CancellationException) {
                 Log.d(TAG, "$label audio capture cancelled")
             } catch (e: Exception) {
@@ -583,15 +614,9 @@ class AssistantService : Service() {
                     return@launch
                 }
                 
-                // Check if Vosk is ready
-                if (!voskTranscriber.isReady()) {
-                    _transcription.value = ""
-                    _response.value = "Voice recognition unavailable. Please download Vosk model in Settings."
-                    _assistantState.value = AssistantState.Complete
-                    return@launch
-                }
-                
-                // Transcribe using Vosk
+                // transcribe() initializes an installed Vosk model on demand.
+                // This avoids the startup race where the model is downloaded
+                // but the background initialization has not completed yet.
                 val transcribedText = voskTranscriber.transcribe(audioFile)
                 
                 // Don't send error messages to LLM
@@ -1242,24 +1267,6 @@ class AssistantService : Service() {
         Log.i(TAG, "Loaded chat $chatId with ${messages.size} messages (continuing existing)")
     }
     
-    /**
-     * Initialize local LLM model if selected
-     */
-    private fun initializeLocalModel() {
-        serviceScope.launch {
-            localModelMutex.withLock {
-                if (llamaCppClient.isModelLoaded()) return@launch
-
-                val activeJob = localModelLoadJob
-                if (activeJob != null && activeJob.isActive) return@launch
-
-                localModelLoadJob = serviceScope.async(Dispatchers.IO) {
-                    loadLocalModelInternal(settingsManager.localModelId)
-                }
-            }
-        }
-    }
-
     private suspend fun loadLocalModelInternal(
         modelId: String,
         updateSelectedId: Boolean = false
@@ -1274,6 +1281,13 @@ class AssistantService : Service() {
 
         val modelInfo = localModelManager.getModelInfo(modelId)
         val modelName = modelInfo?.name ?: "Local Model"
+
+        val modelFile = java.io.File(modelPath)
+        if (!hasEnoughFreeMemoryForLocalModel(modelFile.length(), modelInfo?.contextSize ?: 2048)) {
+            return@withContext Result.failure(
+                Exception("Not enough free memory to load $modelName safely. Close other apps or select a smaller local model.")
+            )
+        }
 
         Log.i(TAG, "Loading local model: $modelName at $modelPath")
 
@@ -1296,6 +1310,25 @@ class AssistantService : Service() {
         }
 
         result
+    }
+
+    /**
+     * Local model weights live in native memory, which is not constrained by the
+     * app heap.  Refuse a load that the OS is very likely to kill instead of
+     * taking down the assistant and its accessibility service with it.
+     */
+    private fun hasEnoughFreeMemoryForLocalModel(modelBytes: Long, contextSize: Int): Boolean {
+        val memoryInfo = ActivityManager.MemoryInfo()
+        val activityManager = getSystemService(ActivityManager::class.java)
+        activityManager.getMemoryInfo(memoryInfo)
+
+        // GGUF weights are memory-mapped, but inference also needs KV cache and
+        // working buffers.  Reserve 128 MiB per 1K context plus a 512 MiB margin.
+        val contextBytes = (contextSize.toLong() / 1024L) * 128L * 1024L * 1024L
+        val requiredBytes = modelBytes + contextBytes + 512L * 1024L * 1024L
+        val hasEnoughMemory = memoryInfo.availMem >= requiredBytes
+        Log.i(TAG, "Local model memory check: available=${memoryInfo.availMem}, required=$requiredBytes, sufficient=$hasEnoughMemory")
+        return hasEnoughMemory
     }
 
     private suspend fun ensureLocalModelReady(): Result<Unit> {
@@ -1352,12 +1385,7 @@ class AssistantService : Service() {
         // Update local model system prompt
         llamaCppClient.setSystemPrompt(settingsManager.systemPrompt)
         
-        // If switched to local provider, initialize local model
-        if (settingsManager.apiProvider == SettingsManager.PROVIDER_LOCAL) {
-            if (!llamaCppClient.isModelLoaded()) {
-                initializeLocalModel()
-            }
-        }
+        // Local models load on the first query, not while Settings is open.
         
         Log.i(TAG, "Model set to: $effectiveModel")
         

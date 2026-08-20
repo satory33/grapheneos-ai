@@ -4,6 +4,28 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val releaseSigningPropertyNames = listOf(
+    "MYAPP_UPLOAD_STORE_FILE",
+    "MYAPP_UPLOAD_STORE_PASSWORD",
+    "MYAPP_UPLOAD_KEY_ALIAS",
+    "MYAPP_UPLOAD_KEY_PASSWORD"
+)
+val configuredReleaseSigningProperties = releaseSigningPropertyNames.filter {
+    providers.gradleProperty(it).isPresent
+}
+
+if (configuredReleaseSigningProperties.isNotEmpty() &&
+    configuredReleaseSigningProperties.size != releaseSigningPropertyNames.size
+) {
+    val missingProperties = releaseSigningPropertyNames - configuredReleaseSigningProperties.toSet()
+    throw GradleException(
+        "Release signing is incomplete. Configure all signing properties or none for a local build. " +
+            "Missing: ${missingProperties.joinToString()}"
+    )
+}
+
+val hasReleaseSigning = configuredReleaseSigningProperties.size == releaseSigningPropertyNames.size
+
 android {
     namespace = "com.satory.graphenosai"
     compileSdk = 36
@@ -42,11 +64,13 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            storeFile = file(property("MYAPP_UPLOAD_STORE_FILE") as String)
-            storePassword = property("MYAPP_UPLOAD_STORE_PASSWORD") as String
-            keyAlias = property("MYAPP_UPLOAD_KEY_ALIAS") as String
-            keyPassword = property("MYAPP_UPLOAD_KEY_PASSWORD") as String
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(providers.gradleProperty("MYAPP_UPLOAD_STORE_FILE").get())
+                storePassword = providers.gradleProperty("MYAPP_UPLOAD_STORE_PASSWORD").get()
+                keyAlias = providers.gradleProperty("MYAPP_UPLOAD_KEY_ALIAS").get()
+                keyPassword = providers.gradleProperty("MYAPP_UPLOAD_KEY_PASSWORD").get()
+            }
         }
     }
 
@@ -59,7 +83,12 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            // Allows local release builds without checking a private keystore into the project.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
 
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

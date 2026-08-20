@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +46,13 @@ import com.satory.graphenosai.service.AssistantService
 import com.satory.graphenosai.tts.TTSManager
 import com.satory.graphenosai.BuildConfig
 import kotlinx.coroutines.launch
+
+private enum class SettingsCategory(val label: String) {
+    AI("AI"),
+    VOICE("Voice"),
+    OUTPUT("Output"),
+    SYSTEM("System")
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("DEPRECATION")
@@ -95,6 +104,15 @@ fun SettingsScreen(
     var isExtracting by remember { mutableStateOf(false) }
     var downloadProgress by remember { mutableStateOf(0) }
     var downloadError by remember { mutableStateOf<String?>(null) }
+    var settingsCategoryName by rememberSaveable { mutableStateOf(SettingsCategory.AI.name) }
+    val settingsCategory = SettingsCategory.valueOf(settingsCategoryName)
+    val settingsScrollState = rememberScrollState()
+
+    // Each category is its own lightweight composition. Returning to a category
+    // does not recreate the assistant service or reload a local model.
+    LaunchedEffect(settingsCategory) {
+        settingsScrollState.scrollTo(0)
+    }
 
     val providerLabel = when (apiProvider) {
         SettingsManager.PROVIDER_LOCAL -> "Local AI"
@@ -144,7 +162,7 @@ fun SettingsScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(settingsScrollState)
                     .padding(bottom = 20.dp)
             ) {
                 SettingsOverviewCard(
@@ -155,7 +173,13 @@ fun SettingsScreen(
                     keyStatus = keyStatus
                 )
 
-            SettingsSection(title = "API Configuration") {
+                SettingsCategoryTabs(
+                    selectedCategory = settingsCategory,
+                    onCategorySelected = { settingsCategoryName = it.name }
+                )
+
+            if (settingsCategory == SettingsCategory.AI) {
+                SettingsSection(title = "API Configuration") {
                 var showProviderDialog by remember { mutableStateOf(false) }
 
                 val providerName = when (apiProvider) {
@@ -333,8 +357,8 @@ fun SettingsScreen(
                 }
             }
 
-            if (apiProvider == SettingsManager.PROVIDER_LOCAL) {
-                SettingsSection(title = "AI Configuration") {
+                if (apiProvider == SettingsManager.PROVIDER_LOCAL) {
+                    SettingsSection(title = "AI Configuration") {
                     SettingsItem(
                         icon = Icons.Default.Description,
                         title = "System Prompt",
@@ -361,10 +385,12 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                    }
                 }
             }
 
-            SettingsSection(title = "Voice Input") {
+            if (settingsCategory == SettingsCategory.VOICE) {
+                SettingsSection(title = "Voice Input") {
                 var showVoiceMethodDialog by remember { mutableStateOf(false) }
                 var whisperProvider by remember { mutableStateOf(settingsManager.whisperProvider) }
                 var showWhisperProviderDialog by remember { mutableStateOf(false) }
@@ -690,9 +716,11 @@ fun SettingsScreen(
                         settingsManager.autoStartVoice = it
                     }
                 )
+                }
             }
 
-            SettingsSection(title = "Output") {
+            if (settingsCategory == SettingsCategory.OUTPUT) {
+                SettingsSection(title = "Output") {
                 val ttsAvailable = remember { com.satory.graphenosai.tts.TTSManager.isTTSAvailable(context) }
 
                 SettingsItemWithSwitch(
@@ -754,9 +782,11 @@ fun SettingsScreen(
                         )
                     }
                 }
+                }
             }
 
-            SettingsSection(title = "Advanced") {
+            if (settingsCategory == SettingsCategory.SYSTEM) {
+                SettingsSection(title = "Advanced") {
                 SettingsItem(
                     icon = Icons.Default.Refresh,
                     title = "Reset to Defaults",
@@ -771,9 +801,9 @@ fun SettingsScreen(
                         autoStartVoice = false
                     }
                 )
-            }
+                }
 
-            SettingsSection(title = "About") {
+                SettingsSection(title = "About") {
                 SettingsItem(
                     icon = Icons.Default.Info,
                     title = "AI Assistant for Android",
@@ -822,6 +852,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
                     }
+                }
                 }
             }
 
@@ -977,6 +1008,28 @@ fun SettingsScreen(
             },
             onDismiss = { showSecondaryLanguageDialog = false }
         )
+    }
+}
+
+@Composable
+private fun SettingsCategoryTabs(
+    selectedCategory: SettingsCategory,
+    onCategorySelected: (SettingsCategory) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        SettingsCategory.entries.forEach { category ->
+            FilterChip(
+                selected = selectedCategory == category,
+                onClick = { onCategorySelected(category) },
+                label = { Text(category.label) }
+            )
+        }
     }
 }
 

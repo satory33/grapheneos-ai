@@ -108,6 +108,7 @@ cmake "$LLAMA_SRC_DIR" \
   -DANDROID_PLATFORM=android-26 \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384 \
   -DLLAMA_CURL=OFF \
   -DLLAMA_BUILD_TESTS=OFF \
   -DBUILD_SHARED_LIBS=ON \
@@ -134,12 +135,27 @@ for f in "${LIB_FILES[@]}"; do
 done
 
 if [ ${#FOUND[@]} -eq 0 ]; then
-  echo "No libraries found - build may have failed. Inspect build logs in $BUILD_SUBDIR"
-  exit 3
+    echo "No libraries found - build may have failed. Inspect build logs in $BUILD_SUBDIR"
+    exit 3
 fi
+
+if [ ${#FOUND[@]} -ne ${#LIB_FILES[@]} ]; then
+  echo "Incomplete llama.cpp build. Expected: ${LIB_FILES[*]}; found: ${FOUND[*]}"
+  exit 4
+fi
+
+# The JNI wrapper is compiled separately by Gradle and needs the public headers
+# that correspond exactly to these shared libraries. Previously only .so files
+# were copied, which made a clean native-enabled Gradle build fail or fall back
+# to the stub implementation.
+INCLUDE_DIR="$PREBUILT_DIR/include"
+mkdir -p "$INCLUDE_DIR"
+cp "$LLAMA_SRC_DIR"/include/*.h "$INCLUDE_DIR/"
+cp "$LLAMA_SRC_DIR"/ggml/include/*.h "$INCLUDE_DIR/"
 
 popd >/dev/null
 
 echo "Copied libraries: ${FOUND[*]} to $PREBUILT_DIR"
+echo "Copied llama.cpp and ggml public headers to $INCLUDE_DIR"
 
 echo "Done. Now rebuild the app: ./gradlew :app:assembleDebug"

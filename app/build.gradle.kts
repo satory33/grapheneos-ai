@@ -172,17 +172,31 @@ dependencies {
 tasks.register("checkLlamaPrebuilt") {
     doLast {
         val prebuiltDir = file("src/main/cpp/llama/prebuilt/arm64-v8a")
-        val required = listOf("libggml-base.so", "libggml-cpu.so", "libggml.so", "libllama.so")
+        val required = listOf(
+            "libggml-base.so",
+            "libggml-cpu.so",
+            "libggml.so",
+            "libllama.so",
+            "include/llama.h"
+        )
         val missing = required.filter {
             !file("src/main/cpp/llama/prebuilt/arm64-v8a/$it").exists()
         }
 
         if (missing.isNotEmpty()) {
-            println("WARNING: Missing prebuilt llama libs: $missing")
-            println("Local AI (llama.cpp) will not be available in this build.")
-            println("The stub JNI implementation will handle this gracefully.")
+            throw GradleException(
+                "Missing native llama.cpp backend: $missing. " +
+                    "Run ./scripts/build-llama-android.sh <path-to-android-ndk> before creating a release APK."
+            )
         } else {
             println("All required prebuilt llama libs present in ${prebuiltDir.absolutePath}")
         }
     }
+}
+
+// A release APK must never silently ship the stub bridge: it makes the Local
+// AI option appear available while every model fails with `Native library not
+// available`. Debug builds may still use the stub for UI-only development.
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn("checkLlamaPrebuilt")
 }

@@ -30,7 +30,7 @@ Models defined in `LocalModelManager.AVAILABLE_MODELS`:
 
 ## Developer: Native Libraries
 
-Prebuilt libs live in `app/src/main/cpp/llama/prebuilt/arm64-v8a/` (gitignored). Without them, Gradle fails `checkLlamaPrebuilt`.
+Prebuilt libs and matching headers live in `app/src/main/cpp/llama/prebuilt/arm64-v8a/` (gitignored). A release build fails before packaging if they are absent, so it cannot silently ship the stub backend.
 
 ### Quick build (recommended)
 
@@ -90,7 +90,7 @@ Linker flag `-Wl,-z,max-page-size=16384` ensures compatibility with Android 15+ 
 | Problem | Fix |
 |---------|-----|
 | "No local model loaded" | Download a model in Settings; check free storage |
-| Build fails on `checkLlamaPrebuilt` | Run `scripts/build-llama-android.sh` |
+| Release build fails on `checkLlamaPrebuilt` | Run `scripts/build-llama-android.sh <path-to-android-ndk>` |
 | Slow inference | Use Qwen3 1.7B or DeepSeek R1 1.5B; close other apps |
 | Download fails | Check network and 3+ GB free space |
 

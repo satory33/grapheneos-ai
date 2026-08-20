@@ -18,8 +18,25 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size
 # llama.cpp prebuilt library path
 set(LLAMA_PREBUILT_DIR ${CMAKE_SOURCE_DIR}/prebuilt/${ANDROID_ABI})
 
-# Check for prebuilt library
-if(EXISTS ${LLAMA_PREBUILT_DIR}/libllama.so)
+# Keep the imported ABI set all-or-nothing. Importing only libllama.so gives a
+# confusing linker or runtime error when one of its ggml dependencies is absent.
+set(LLAMA_REQUIRED_FILES
+    libggml-base.so
+    libggml-cpu.so
+    libggml.so
+    libllama.so
+    include/llama.h
+)
+set(LLAMA_PREBUILT_COMPLETE TRUE)
+foreach(REQUIRED_FILE IN LISTS LLAMA_REQUIRED_FILES)
+    if(NOT EXISTS ${LLAMA_PREBUILT_DIR}/${REQUIRED_FILE})
+        message(STATUS "Missing llama.cpp prebuilt file: ${LLAMA_PREBUILT_DIR}/${REQUIRED_FILE}")
+        set(LLAMA_PREBUILT_COMPLETE FALSE)
+    endif()
+endforeach()
+
+# Check for the complete prebuilt native backend
+if(LLAMA_PREBUILT_COMPLETE)
     message(STATUS "Using prebuilt llama.cpp from ${LLAMA_PREBUILT_DIR}")
     
     # Import prebuilt libraries
@@ -69,8 +86,8 @@ if(EXISTS ${LLAMA_PREBUILT_DIR}/libllama.so)
     )
     
 else()
-    # No prebuilt library - use stub
-    message(STATUS "Prebuilt llama.cpp not found. Building stub library.")
+    # No complete native backend - use the stub for development builds.
+    message(WARNING "Complete llama.cpp prebuilt backend not found. Building stub library.")
     
     # Build stub library
     add_library(llama_jni SHARED

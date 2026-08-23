@@ -11,6 +11,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * Manages downloading and storage of local AI models (GGUF format)
@@ -20,17 +22,23 @@ class LocalModelManager(private val context: Context) {
 
     companion object {
         private const val TAG = "LocalModelManager"
-        
+
         // Directory for storing models
         private const val MODELS_DIR = "local_models"
-        
+
         // Buffer size for downloads (256KB for better performance)
         private const val DOWNLOAD_BUFFER_SIZE = 256 * 1024
-        
+        private const val HTTP_RANGE_NOT_SATISFIABLE = 416
+
+        private val CONTENT_RANGE_REGEX =
+            Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""", RegexOption.IGNORE_CASE)
+        private val UNSATISFIED_CONTENT_RANGE_REGEX =
+            Regex("""bytes\s+\*/(\d+)""", RegexOption.IGNORE_CASE)
+
         /**
          * Available models optimized for ARM64/Pixel devices
          * These are quantized models that balance quality and performance
-         * 
+         *
          * Selection criteria:
          * - Q4_K_M quantization: Best quality/size ratio for mobile
          * - 1B-8B parameters: Optimal for Pixel 6/7/8 with 8-12GB RAM
@@ -138,25 +146,31 @@ class LocalModelManager(private val context: Context) {
             )
         )
     }
-    
+
+    private data class ContentRange(
+        val start: Long,
+        val end: Long,
+        val total: Long?
+    )
+
     private val modelsDir: File by lazy {
         File(context.filesDir, MODELS_DIR).apply {
             if (!exists()) mkdirs()
         }
     }
-    
+
     /**
      * Get the models directory path
      */
     fun getModelsDirectory(): File = modelsDir
-    
+
     /**
      * Get all downloaded models
      */
     fun getDownloadedModels(): List<LocalModelInfo> {
         return AVAILABLE_MODELS.filter { isModelDownloaded(it.id) }
     }
-    
+
     /**
      * Check if a specific model is downloaded
      */
@@ -165,7 +179,7 @@ class LocalModelManager(private val context: Context) {
         val modelFile = File(modelsDir, model.filename)
         return modelFile.exists() && modelFile.length() > 0
     }
-    
+
     /**
      * Get the file path for a model
      */
@@ -174,17 +188,21 @@ class LocalModelManager(private val context: Context) {
         val modelFile = File(modelsDir, model.filename)
         return if (modelFile.exists()) modelFile.absolutePath else null
     }
-    
+
     /**
      * Get model info by ID
      */
     fun getModelInfo(modelId: String): LocalModelInfo? {
         return AVAILABLE_MODELS.find { it.id == modelId }
     }
-    
+
     /**
-     * Download a model with progress updates
-     * Returns a Flow with download progress (0-100) or error
+     * Download a model with progress updates.
+     *
+     * Partial downloads are resumed only when the server confirms the exact
+     * requested byte offset with HTTP 206 + Content-Range. If a server ignores
+     * Range and returns HTTP 200, the temp file is truncated and the response
+     * is written from byte zero instead of being appended to stale data.
      */
     fun downloadModel(modelId: String): Flow<DownloadProgress> = flow {
         val model = AVAILABLE_MODELS.find { it.id == modelId }
@@ -192,86 +210,267 @@ class LocalModelManager(private val context: Context) {
             emit(DownloadProgress.Error("Model not found: $modelId"))
             return@flow
         }
-        
+
         val modelFile = File(modelsDir, model.filename)
         val tempFile = File(modelsDir, "${model.filename}.tmp")
-        
+
         // Check if already downloaded
         if (modelFile.exists() && modelFile.length() == model.sizeBytes) {
             Log.i(TAG, "Model already downloaded: ${model.name}")
             emit(DownloadProgress.Completed(modelFile.absolutePath))
             return@flow
         }
-        
+
         Log.i(TAG, "Starting download: ${model.name} from ${model.downloadUrl}")
         emit(DownloadProgress.Started(model.name))
-        
+
+        var connection: HttpURLConnection? = null
+
         try {
             val url = URL(model.downloadUrl)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.connectTimeout = 30000
-            connection.readTimeout = 60000
-            connection.setRequestProperty("User-Agent", "GrapheneOS-AI-Assistant/1.0")
-            
-            // Support resuming downloads
-            var downloadedBytes = 0L
-            if (tempFile.exists()) {
-                downloadedBytes = tempFile.length()
-                connection.setRequestProperty("Range", "bytes=$downloadedBytes-")
-                Log.i(TAG, "Resuming download from byte $downloadedBytes")
+            var resumeOffset = tempFile.takeIf { it.exists() }?.length() ?: 0L
+
+            if (resumeOffset == 0L && tempFile.exists()) {
+                discardTempFile(tempFile)
             }
-            
-            connection.connect()
-            
-            val responseCode = connection.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK && responseCode != HttpURLConnection.HTTP_PARTIAL) {
+
+            connection = openDownloadConnection(url, resumeOffset)
+            var responseCode = connection.responseCode
+
+            if (resumeOffset > 0L) {
+                when (responseCode) {
+                    HttpURLConnection.HTTP_PARTIAL -> {
+                        val range = parseContentRange(connection.getHeaderField("Content-Range"))
+                        if (range == null || range.start != resumeOffset) {
+                            Log.w(
+                                TAG,
+                                "Server returned an invalid Content-Range while resuming: " +
+                                    connection.getHeaderField("Content-Range") +
+                                    ". Restarting from byte 0."
+                            )
+                            connection.disconnect()
+                            discardTempFile(tempFile)
+                            resumeOffset = 0L
+                            connection = openDownloadConnection(url, resumeOffset)
+                            responseCode = connection.responseCode
+                        }
+                    }
+
+                    HttpURLConnection.HTTP_OK -> {
+                        // The server ignored Range. Reuse this full response, but make
+                        // sure FileOutputStream truncates the existing temp file.
+                        Log.w(TAG, "Server ignored Range request; restarting download from byte 0")
+                        resumeOffset = 0L
+                    }
+
+                    HTTP_RANGE_NOT_SATISFIABLE -> {
+                        val remoteSize = parseUnsatisfiedContentRangeTotal(
+                            connection.getHeaderField("Content-Range")
+                        )
+
+                        if (remoteSize != null && tempFile.length() == remoteSize) {
+                            Log.i(TAG, "Partial file is already complete; finalizing download")
+                            if (finalizeDownload(tempFile, modelFile)) {
+                                emit(DownloadProgress.Completed(modelFile.absolutePath))
+                            } else {
+                                emit(DownloadProgress.Error("Failed to finalize download"))
+                            }
+                            return@flow
+                        }
+
+                        Log.w(TAG, "Resume offset is no longer valid; restarting download from byte 0")
+                        connection.disconnect()
+                        discardTempFile(tempFile)
+                        resumeOffset = 0L
+                        connection = openDownloadConnection(url, resumeOffset)
+                        responseCode = connection.responseCode
+                    }
+                }
+            }
+
+            if (responseCode != HttpURLConnection.HTTP_OK &&
+                responseCode != HttpURLConnection.HTTP_PARTIAL
+            ) {
                 emit(DownloadProgress.Error("Download failed: HTTP $responseCode"))
                 return@flow
             }
-            
-            val totalBytes = if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                model.sizeBytes
+
+            val contentRange = if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                parseContentRange(connection.getHeaderField("Content-Range"))
             } else {
-                connection.contentLength.toLong().let { if (it > 0) it else model.sizeBytes }
+                null
             }
-            
-            val inputStream = connection.inputStream
-            val outputStream = FileOutputStream(tempFile, downloadedBytes > 0)
-            
-            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
-            var bytesRead: Int
-            var totalDownloaded = downloadedBytes
-            var lastProgressUpdate = 0
-            
-            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-                totalDownloaded += bytesRead
-                
-                val progress = ((totalDownloaded.toFloat() / totalBytes) * 100).toInt()
-                if (progress > lastProgressUpdate) {
-                    lastProgressUpdate = progress
-                    emit(DownloadProgress.Downloading(progress, totalDownloaded, totalBytes))
+
+            if (responseCode == HttpURLConnection.HTTP_PARTIAL &&
+                (contentRange == null || contentRange.start != resumeOffset)
+            ) {
+                emit(DownloadProgress.Error("Download failed: invalid Content-Range response"))
+                return@flow
+            }
+
+            // Content-Range total is authoritative for resumed downloads. For a
+            // full HTTP 200 response, Content-Length is the exact expected size.
+            val expectedTotalBytes = when {
+                contentRange?.total != null -> contentRange.total
+                responseCode == HttpURLConnection.HTTP_OK && connection.contentLengthLong > 0L ->
+                    connection.contentLengthLong
+                responseCode == HttpURLConnection.HTTP_PARTIAL && connection.contentLengthLong > 0L ->
+                    resumeOffset + connection.contentLengthLong
+                else -> null
+            }
+
+            // model.sizeBytes is display metadata and may be rounded, so use it
+            // only for progress when the HTTP response does not expose a total.
+            val progressTotalBytes = expectedTotalBytes ?: model.sizeBytes
+            val append = responseCode == HttpURLConnection.HTTP_PARTIAL && resumeOffset > 0L
+            var totalDownloaded = if (append) resumeOffset else 0L
+            var lastProgressUpdate = if (progressTotalBytes > 0L) {
+                ((totalDownloaded.toDouble() / progressTotalBytes) * 100)
+                    .toInt()
+                    .coerceIn(0, 100)
+            } else {
+                0
+            }
+
+            connection.inputStream.use { inputStream ->
+                FileOutputStream(tempFile, append).use { outputStream ->
+                    val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+                    var bytesRead: Int
+
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
+                        totalDownloaded += bytesRead
+
+                        if (progressTotalBytes > 0L) {
+                            val progress = ((totalDownloaded.toDouble() / progressTotalBytes) * 100)
+                                .toInt()
+                                .coerceIn(0, 100)
+                            if (progress > lastProgressUpdate) {
+                                lastProgressUpdate = progress
+                                emit(
+                                    DownloadProgress.Downloading(
+                                        progress,
+                                        totalDownloaded,
+                                        progressTotalBytes
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    outputStream.flush()
                 }
             }
-            
-            outputStream.close()
-            inputStream.close()
-            connection.disconnect()
-            
-            // Rename temp file to final name
-            if (tempFile.renameTo(modelFile)) {
-                Log.i(TAG, "Download completed: ${model.name}")
+
+            val downloadedSize = tempFile.length()
+            if (downloadedSize <= 0L) {
+                emit(DownloadProgress.Error("Download failed: empty model file"))
+                return@flow
+            }
+
+            if (expectedTotalBytes != null && downloadedSize != expectedTotalBytes) {
+                Log.w(
+                    TAG,
+                    "Downloaded size mismatch: expected $expectedTotalBytes bytes, got $downloadedSize"
+                )
+                if (downloadedSize > expectedTotalBytes) {
+                    // A file larger than the server's advertised total cannot be
+                    // resumed safely. Remove it so the next attempt starts clean.
+                    discardTempFile(tempFile)
+                }
+                emit(
+                    DownloadProgress.Error(
+                        "Download incomplete: expected $expectedTotalBytes bytes, got $downloadedSize"
+                    )
+                )
+                return@flow
+            }
+
+            if (finalizeDownload(tempFile, modelFile)) {
+                Log.i(TAG, "Download completed: ${model.name} ($downloadedSize bytes)")
                 emit(DownloadProgress.Completed(modelFile.absolutePath))
             } else {
                 emit(DownloadProgress.Error("Failed to finalize download"))
             }
-            
         } catch (e: Exception) {
             Log.e(TAG, "Download error", e)
             emit(DownloadProgress.Error("Download failed: ${e.message}"))
+        } finally {
+            connection?.disconnect()
         }
     }.flowOn(Dispatchers.IO)
-    
+
+    private fun openDownloadConnection(url: URL, resumeOffset: Long): HttpURLConnection {
+        return (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 30000
+            readTimeout = 60000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "GrapheneOS-AI-Assistant/1.0")
+            setRequestProperty("Accept-Encoding", "identity")
+
+            if (resumeOffset > 0L) {
+                setRequestProperty("Range", "bytes=$resumeOffset-")
+                Log.i(TAG, "Requesting resume from byte $resumeOffset")
+            }
+
+            connect()
+        }
+    }
+
+    private fun parseContentRange(header: String?): ContentRange? {
+        val match = header?.trim()?.let { CONTENT_RANGE_REGEX.matchEntire(it) } ?: return null
+        val start = match.groupValues[1].toLongOrNull() ?: return null
+        val end = match.groupValues[2].toLongOrNull() ?: return null
+        val total = match.groupValues[3]
+            .takeUnless { it == "*" }
+            ?.toLongOrNull()
+
+        if (end < start) return null
+        if (total != null && (total <= 0L || end >= total)) return null
+
+        return ContentRange(start = start, end = end, total = total)
+    }
+
+    private fun parseUnsatisfiedContentRangeTotal(header: String?): Long? {
+        val match = header?.trim()?.let { UNSATISFIED_CONTENT_RANGE_REGEX.matchEntire(it) }
+            ?: return null
+        return match.groupValues[1].toLongOrNull()
+    }
+
+    private fun discardTempFile(tempFile: File) {
+        if (!tempFile.exists()) return
+
+        if (!tempFile.delete()) {
+            // If deletion fails, truncate it so a later full response can never
+            // append to stale bytes from a previous attempt.
+            FileOutputStream(tempFile, false).use { it.flush() }
+        }
+    }
+
+    private fun finalizeDownload(tempFile: File, modelFile: File): Boolean {
+        return try {
+            Files.move(
+                tempFile.toPath(),
+                modelFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+            true
+        } catch (atomicMoveError: Exception) {
+            Log.w(TAG, "Atomic move unavailable, falling back to regular replace", atomicMoveError)
+            try {
+                Files.move(
+                    tempFile.toPath(),
+                    modelFile.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+                true
+            } catch (moveError: Exception) {
+                Log.e(TAG, "Failed to move completed model into place", moveError)
+                false
+            }
+        }
+    }
+
     /**
      * Delete a downloaded model
      */
@@ -279,7 +478,7 @@ class LocalModelManager(private val context: Context) {
         val model = AVAILABLE_MODELS.find { it.id == modelId } ?: return@withContext false
         val modelFile = File(modelsDir, model.filename)
         val tempFile = File(modelsDir, "${model.filename}.tmp")
-        
+
         var deleted = false
         if (modelFile.exists()) {
             deleted = modelFile.delete()
@@ -287,11 +486,11 @@ class LocalModelManager(private val context: Context) {
         if (tempFile.exists()) {
             tempFile.delete()
         }
-        
+
         Log.i(TAG, "Deleted model $modelId: $deleted")
         deleted
     }
-    
+
     /**
      * Get total storage used by downloaded models
      */
@@ -301,7 +500,7 @@ class LocalModelManager(private val context: Context) {
             ?.sumOf { it.length() }
             ?: 0L
     }
-    
+
     /**
      * Get available storage on device
      */
